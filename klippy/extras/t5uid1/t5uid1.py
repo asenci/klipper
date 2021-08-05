@@ -155,16 +155,9 @@ class T5UID1:
         self._pages = {}
         self._routines = {}
         self._is_printing = False
-        self._print_progress = 0
-        self._print_start_time = -1
-        self._print_pause_time = -1
-        self._print_end_time = -1
         self._boot_page = self._timeout_page = self._shutdown_page = None
         self._t5uid1_ping_cmd = self._t5uid1_write_cmd = None
         self._is_connected = False
-
-        self._original_M73 = None
-        self._original_M117 = None
 
         global_context = {
             'get_variable': self.get_variable,
@@ -173,7 +166,6 @@ class T5UID1:
             'disable_control': self.disable_control,
             'start_routine': self.start_routine,
             'stop_routine': self.stop_routine,
-            'set_message': self.set_message,
             'bitwise_and': bitwise_and,
             'bitwise_or': bitwise_or
         }
@@ -212,7 +204,6 @@ class T5UID1:
             'abort_page_switch': self.abort_page_switch,
             'full_update': self.full_update,
             'is_busy': self.is_busy,
-            'check_paused': self.check_paused
         })
 
         self._status_data.update({
@@ -254,6 +245,8 @@ class T5UID1:
                                             self._handle_shutdown)
         self.printer.register_event_handler("klippy:disconnect",
                                             self._handle_disconnect)
+
+        self.printer.load_object(config, "display_status")
 
     def _load_config(self, config, fnames, ctx_in, ctx_out, ctx_routine):
         if type(fnames) is not list:
@@ -369,18 +362,6 @@ class T5UID1:
             has_bltouch = True
         except self.printer.config_error:
             pass
-
-        if self._original_M73 is None:
-            original_M73 = self.gcode.register_command('M73', None)
-            if original_M73 != self.cmd_M73:
-                self._original_M73 = original_M73
-            self.gcode.register_command('M73', self.cmd_M73)
-
-        if self._original_M117 is None:
-            original_M117 = self.gcode.register_command('M117', None)
-            if original_M117 != self.cmd_M117:
-                self._original_M117 = original_M117
-            self.gcode.register_command('M117', self.cmd_M117)
 
         self._status_data.update({
             'limits': self.limits(),
@@ -540,27 +521,9 @@ class T5UID1:
     def set_variable(self, name, value):
         self._variable_data[name] = value
 
-    def check_paused(self):
-        if not self._is_printing:
-            return
-        curtime = self.reactor.monotonic()
-        if self._print_pause_time < 0 and self.pause_resume.is_paused:
-            self._print_pause_time = curtime
-        elif self._print_pause_time >= 0 and not self.pause_resume.is_paused:
-            pause_duration = curtime - self._print_pause_time
-            if pause_duration > 0:
-                self._print_start_time += pause_duration
-            self._print_pause_time = -1
-
     def get_status(self, eventtime):
         pages = { p: self._pages[p].id for p in self._pages }
         res = dict(self._status_data)
-        if not self._is_printing:
-            print_duration = self._print_end_time - self._print_start_time
-        elif self._print_pause_time >= 0:
-            print_duration = self._print_pause_time - self._print_start_time
-        else:
-            print_duration = eventtime - self._print_start_time
         res.update({
             'version': self._version,
             'machine_name': self._machine_name,
@@ -573,8 +536,6 @@ class T5UID1:
             'pages': pages,
             'control_types': CONTROL_TYPES,
             'is_printing': self._is_printing,
-            'print_progress': self._print_progress,
-            'print_duration': max(0, print_duration)
         })
         return res
 
@@ -843,13 +804,6 @@ class T5UID1:
             'y_max_inset': y_max_inset
         }
 
-    def set_message(self, message):
-        self.set_variable('message', message)
-        if 'message' in self._vars:
-            self.send_var('message')
-        if len(message) > 0 and 'message_timeout' in self._routines:
-            self.start_routine('message_timeout')
-
     def is_busy(self):
         eventtime = self.reactor.monotonic()
         print_time, est_print_time, lookahead_empty = self.toolhead.check_busy(
@@ -880,49 +834,16 @@ class T5UID1:
                           % (start, slen, volume))
 
     def cmd_DGUS_PRINT_START(self, gcmd):
-        self._print_progress = 0
-        self._print_start_time = self.reactor.monotonic()
-        self._print_pause_time = -1
-        self._print_end_time = -1
         self._is_printing = True
-        self.check_paused()
         if 'print_start' in self._routines:
             self.start_routine('print_start')
 
     def cmd_DGUS_PRINT_END(self, gcmd):
         if not self._is_printing:
             return
-        self._print_progress = 100
-        curtime = self.reactor.monotonic()
-        if self._print_pause_time >= 0:
-            pause_duration = curtime - self._print_pause_time
-            if pause_duration > 0:
-                self._print_start_time += pause_duration
-            self._print_pause_time = -1
-        self._print_end_time = curtime
         self._is_printing = False
         if 'print_end' in self._routines:
             self.start_routine('print_end')
-
-    def cmd_M73(self, gcmd):
-        progress = gcmd.get_int('P', 0)
-        self._print_progress = min(100, max(0, progress))
-        if self._original_M73 is not None:
-            self._original_M73(gcmd)
-
-    def cmd_M117(self, gcmd):
-        msg = gcmd.get_commandline()
-        umsg = msg.upper()
-        if not umsg.startswith('M117'):
-            start = umsg.find('M117')
-            end = msg.rfind('*')
-            msg = msg[start:end]
-        if len(msg) > 5:
-            self.set_message(msg[5:])
-        else:
-            self.set_message("")
-        if self._original_M117 is not None:
-            self._original_M117(gcmd)
 
     def cmd_M300(self, gcmd):
         if self._notification_sound >= 0:
