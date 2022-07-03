@@ -122,7 +122,7 @@ class T5UID1_Var:
         result = self._template.render(context)
 
         if self.data_type == "str":
-            result = bytearray(result.replace('\n', ''))
+            result = bytearray(result.replace('\n', '').encode())
             target_len = self.data_len
             if target_len % 2 != 0:
                 target_len += 1
